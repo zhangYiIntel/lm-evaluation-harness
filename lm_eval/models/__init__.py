@@ -48,6 +48,7 @@ MODEL_MAPPING = {
     "openai-chat-completions": "lm_eval.models.openai_completions:OpenAIChatCompletion",
     "openai-completions": "lm_eval.models.openai_completions:OpenAICompletionsAPI",
     "openvino": "lm_eval.models.optimum_lm:OptimumLM",
+    "openvino-mx": "lm_eval.models.openvino_mx:OpenVINOMX",
     "habana": "lm_eval.models.optimum_habana:HabanaLM",
     "sglang": "lm_eval.models.sglang_causallms:SGLangLM",
     "sglang-generate": "lm_eval.models.sglang_generate_API:SGLANGGENERATEAPI",

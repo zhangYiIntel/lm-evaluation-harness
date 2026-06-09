@@ -351,6 +351,12 @@ class HFMultimodalLM(HFLM):
         generation_kwargs["temperature"] = generation_kwargs.get("temperature", 0.0)
         do_sample = generation_kwargs.get("do_sample")
 
+        # Qwen3-Omni text+image evaluation should not request audio output or a TTS speaker.
+        # Some task-level kwargs may include unsupported speaker values (e.g. "Ethan").
+        if getattr(self.config, "model_type", None) == "qwen3_omni":
+            generation_kwargs["return_audio"] = False
+            generation_kwargs["speaker"] = None
+
         # The temperature has to be a strictly positive float -- if it is 0.0, use greedy decoding strategies
         if generation_kwargs.get("temperature") == 0.0 and do_sample is None:
             generation_kwargs["do_sample"] = do_sample = False
@@ -364,7 +370,7 @@ class HFMultimodalLM(HFLM):
             inputs["input_ids"].shape[1],
             inputs["input_ids"].shape[0],
         )
-        return self.model.generate(
+        generation_output = self.model.generate(
             **inputs,
             max_length=max_length,
             stopping_criteria=stopping_criteria,
@@ -372,6 +378,13 @@ class HFMultimodalLM(HFLM):
             use_cache=True,
             **generation_kwargs,
         )
+
+        # Qwen3-Omni may return a tuple like (text_ids, audio).
+        # lm-eval generate_until expects token ids only.
+        if isinstance(generation_output, tuple):
+            return generation_output[0]
+
+        return generation_output
 
     def _batch_images(self, image_encs):
         """

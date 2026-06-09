@@ -811,16 +811,42 @@ class HFLM(TemplateLM):
                 if vparse(transformers.__version__) >= vparse("4.56.0")
                 else "torch_dtype"
             )
-            self._model = self.AUTO_MODEL_CLASS.from_pretrained(
-                pretrained,
-                revision=revision,
-                **{dtype_arg: get_dtype(dtype)},
-                trust_remote_code=trust_remote_code,
-                gguf_file=gguf_file,
-                quantization_config=quantization_config,
-                subfolder=subfolder,
-                **model_kwargs,
-            )
+            try:
+                self._model = self.AUTO_MODEL_CLASS.from_pretrained(
+                    pretrained,
+                    revision=revision,
+                    **{dtype_arg: get_dtype(dtype)},
+                    trust_remote_code=trust_remote_code,
+                    gguf_file=gguf_file,
+                    quantization_config=quantization_config,
+                    subfolder=subfolder,
+                    **model_kwargs,
+                )
+            except ValueError as err:
+                # Qwen3-Omni currently maps to Qwen3OmniForConditionalGeneration,
+                # but not AutoModelForImageTextToText in some transformers builds.
+                if (
+                    self.AUTO_MODEL_CLASS == transformers.AutoModelForImageTextToText
+                    and "Qwen3OmniConfig" in str(err)
+                    and hasattr(transformers, "Qwen3OmniForConditionalGeneration")
+                ):
+                    eval_logger.info(
+                        "Falling back to Qwen3OmniForConditionalGeneration for Qwen3OmniConfig"
+                    )
+                    self._model = (
+                        transformers.Qwen3OmniForConditionalGeneration.from_pretrained(
+                            pretrained,
+                            revision=revision,
+                            **{dtype_arg: get_dtype(dtype)},
+                            trust_remote_code=trust_remote_code,
+                            gguf_file=gguf_file,
+                            quantization_config=quantization_config,
+                            subfolder=subfolder,
+                            **model_kwargs,
+                        )
+                    )
+                else:
+                    raise
         else:
             if autogptq and gptqmodel:
                 raise ValueError(
@@ -1177,6 +1203,7 @@ class HFLM(TemplateLM):
         stopping_criteria = stop_sequences_criteria(
             self.tokenizer, stop, context.shape[1], context.shape[0]
         )
+        print("LM!!!!!!", context)
         with torch.autocast(
             device_type=self.device.type,
             dtype=self.mixed_precision_dtype,
@@ -1418,7 +1445,6 @@ class HFLM(TemplateLM):
                 assert len(context_enc) > 0
                 assert len(continuation_enc) > 0
                 assert len(continuation_enc) <= self.max_length
-
                 # how this all works (illustrated on a causal decoder-only setup):
                 #          CTX      CONT
                 # inp    0 1 2 3|4 5 6 7 8 9   <- last token is deleted by inp[:, :-1]
@@ -1653,6 +1679,7 @@ class HFLM(TemplateLM):
                 max_ctx_len = self.max_length
 
             # encode, pad, and truncate contexts for this batch
+            print("LM harness text", contexts)
             context_enc, attn_masks = self.tok_batch_encode(
                 contexts,
                 left_truncate_len=max_ctx_len,
@@ -1750,11 +1777,20 @@ class HFLM(TemplateLM):
 
         def get_model_num_params(model) -> int:
             if hasattr(model, "num_parameters"):
-                return model.num_parameters()
+                try:
+                    return model.num_parameters()
+                except Exception as e:
+                    eval_logger.debug(
+                        f"Failed to read model.num_parameters(); returning -1. Error: {e}"
+                    )
             if hasattr(model, "parameters"):
-                return sum(p.numel() for p in model.parameters())
-            else:
-                return -1
+                try:
+                    return sum(p.numel() for p in model.parameters())
+                except Exception as e:
+                    eval_logger.debug(
+                        f"Failed to iterate model.parameters(); returning -1. Error: {e}"
+                    )
+            return -1
 
         def get_model_dtype(model) -> str:
             if hasattr(model, "dtype"):

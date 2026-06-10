@@ -143,7 +143,9 @@ class LM(abc.ABC):
         additional_config = {} if additional_config is None else additional_config
         args = utils.simple_parse_args_string(arg_string)
         args2 = {k: v for k, v in additional_config.items() if v is not None}
-        return cls(**args, **args2)
+        # Prefer explicit model args when both sources provide the same key.
+        merged_args = {**args2, **args}
+        return cls(**merged_args)
 
     @classmethod
     def create_from_arg_obj(
@@ -165,8 +167,9 @@ class LM(abc.ABC):
             if additional_config is None
             else {k: v for k, v in additional_config.items() if v is not None}
         )
-
-        return cls(**arg_dict, **additional_config)
+        # Prefer explicit model args when both sources provide the same key.
+        merged_args = {**additional_config, **arg_dict}
+        return cls(**merged_args)
 
     # Distributed communication primitives, used by evaluate() to synchronize across ranks;
     # Override if relying on the evaluator() for data-parallel distribution of requests.

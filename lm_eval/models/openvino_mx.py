@@ -17,11 +17,13 @@ eval_logger = logging.getLogger(__name__)
 
 @register_model("openvino-mx")
 class OpenVINOMX(LM):
-    """OpenVINO VLM backend using VLMPipeline.
+    """OpenVINO backend using VLMPipeline with optional LLMPipeline fallback.
 
-    This backend is intended for multimodal generation tasks where
-    `Instance.args` is `(context, gen_kwargs, aux_arguments)` and
-    `aux_arguments["visual"]` contains image objects.
+    For multimodal generation tasks, `Instance.args` is
+    `(context, gen_kwargs, aux_arguments)` and `aux_arguments["visual"]`
+    contains image objects.
+    For text-only generation tasks, this backend can fall back to LLMPipeline
+    when no visual input is provided.
     """
 
     MULTIMODAL = True
@@ -49,11 +51,14 @@ class OpenVINOMX(LM):
             )
 
         import openvino as ov
-        from pipeline import GenerationConfig, VLMPipeline
+        from pipeline import GenerationConfig, LLMPipeline, VLMPipeline
 
         self.ov = ov
         self.GenerationConfig = GenerationConfig
+        print("!!!!!!! VLMPIPELINE PRETRAINED device", self._device)
         self.pipe = VLMPipeline(self.pretrained, self._device)
+        self.allow_text_only = bool(kwargs.get("allow_text_only", True))
+        self.text_pipe = LLMPipeline(self.pretrained, self._device)
         self.min_image_side = int(
             kwargs.get("min_image_side", self._infer_min_image_side(self.pretrained))
         )
@@ -221,6 +226,18 @@ class OpenVINOMX(LM):
                 out = out.split(term)[0]
         return out
 
+    @staticmethod
+    def _llm_generate_kwargs(gen_kwargs: dict, default_max_new_tokens: int) -> dict:
+        kwargs = {
+            "max_new_tokens": int(gen_kwargs.get("max_gen_toks", default_max_new_tokens))
+        }
+        for key in ("temperature", "top_p", "top_k", "repetition_penalty"):
+            if key in gen_kwargs:
+                kwargs[key] = gen_kwargs[key]
+        if "do_sample" in gen_kwargs:
+            kwargs["do_sample"] = gen_kwargs["do_sample"]
+        return kwargs
+
     def generate_until(
         self, requests: list[Instance], disable_tqdm: bool = False
     ) -> list[str]:
@@ -260,21 +277,35 @@ class OpenVINOMX(LM):
                 until = [until]
 
             image_tensors = self._images_to_tensors(aux_arguments)
-            if image_tensors is None:
-                raise ValueError(
-                    "openvino-mx requires image input in aux_arguments['visual']."
-                )
             prompt = self._extract_prompt(context)
             if not prompt:
                 raise ValueError("openvino-mx could not extract a text prompt.")
 
-            try:
-                output = self.pipe.generate(prompt, image_tensors, cfg)
-            except RuntimeError as err:
-                image_shapes = [tuple(getattr(tensor, "shape", ())) for tensor in image_tensors]
-                raise RuntimeError(
-                    f"openvino-mx generate_until failed at request index {req_idx} with image shapes {image_shapes}: {err}"
-                ) from err
+            if image_tensors is None:
+                if not self.allow_text_only:
+                    raise ValueError(
+                        "openvino-mx requires image input in aux_arguments['visual']. "
+                        "Set model_args allow_text_only=true to enable LLMPipeline fallback."
+                    )
+                llm_kwargs = self._llm_generate_kwargs(
+                    gen_kwargs, self.default_max_new_tokens
+                )
+                try:
+                    output = self.text_pipe.generate(prompt, **llm_kwargs)
+                except RuntimeError as err:
+                    raise RuntimeError(
+                        f"openvino-mx text-only generate_until failed at request index {req_idx}: {err}"
+                    ) from err
+            else:
+                try:
+                    output = self.pipe.generate(prompt, image_tensors, cfg)
+                except RuntimeError as err:
+                    image_shapes = [
+                        tuple(getattr(tensor, "shape", ())) for tensor in image_tensors
+                    ]
+                    raise RuntimeError(
+                        f"openvino-mx generate_until failed at request index {req_idx} with image shapes {image_shapes}: {err}"
+                    ) from err
             text = output.texts[0] if output and output.texts else ""
             print(f"Generated text before applying 'until': {text}")
             results.append(self._apply_stop(text, until))
